@@ -1,0 +1,517 @@
+---
+title: "New York State Hospital Discharges - 2014"
+author: 'Rebecca Lindner (UNI: rml2183)'
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+#Introduction
+Given my background in healthcare analysis, I have chosen to work with data on hospital inpatient discharges in New York State for 2014. As an analyst for Mount Sinai Hospital's HIV care programs, I have a great deal of experience working with outpatient data from the electronic medical record (EMR), but have not had an opportunity to look at data on the inpatient side at a state-wide level. I found this data by searching for inpatient discharge datasets, initially planning to work with multiple states for comparison. After seeing the volume of data for New York for just one year, however, I decided to work with this single dataset. The data is available for download here (https://health.data.ny.gov/Health/Hospital-Inpatient-Discharges-SPARCS-De-Identified/rmwa-zns4/data) along with the documentation and data dictionary. Population data used to create the map graphics can be found here (https://factfinder.census.gov/faces/tableservices/jsf/pages/productview.xhtml?src=bkmk).   
+The dataset contains discharge-level information for every hospital in New York State, broken down by Hospital Service Area or by County, with fields for Hospital Name, ID, and Operating Certificate Number. All of this identifying information is redacted for abortion records, but is available for all other admissions. Demographic information includes Age Group, Zip-3, Gender, Race, and Ethnicity. Length of Stay, Admit Day of Week, Type of Admission, Patient Disposition, Discharge Year, and Discharge Day of Week are also provided for each record. Medical information includes diagnosis codes, procedure codes, illness severity and risk of mortality codes, and medical-surgical classifications. Payor information is also available, as are total charges and total costs.  
+The main questions I set out to answer with this dataset were whether diagnosis prevalence difference between different geogrpahic and demographic groups, how length of stay correlated with admission day of week, diagnosis, and severity of illness, and what kinds of costs and charge amounts were associated with admissions.
+
+#Project Stages/Team Description
+As I chose to work alone for the final project, I divided the tasks into several stages. First, I explored the variables through histograms and bar charts in order to form some initial ideas of what I might want to study. Then, I cleaned the data while writing up a draft of my analysis of the data quality. Cleaning was a relatively simple task with this dataset, as explained in the following section. I next found the additional dataset of county populations in 2014 to supplement some of my analysis and ensured that county names were consistent across the two datasets. I continued performing exploratory data analysis from a number of perspectives, primarily demographics of patients admitted, diagnoses, length of stay, costs/charges, and locations of admissions. Using this, I was able to create cohesive executive summary and analysis sections. Finally, I revised my introduction and team description sections and wrote the conclusion. There is a huge number of questions that can be asked of this dataset that I did not even begin to explore, but I limited myself to my primary investigative aims as best as possible.  
+
+#Analysis of Data Quality
+```{r}
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(maps)
+library(stringr)
+library(viridis)
+library(lucr)
+library(extracat)
+library(vcd)
+library(grid)
+library(formattable)
+
+hosp <- read.csv(file="SPARCS_2014.csv",header=TRUE,sep=",")
+```
+The dataset contains 2,365,208 hospital inpatient discharge records, described by 39 different variables. The documentation does not mention any major data quality issues, other than the fact that many variables are redacted for abortion records. A missingness visualization of the dataset first revealed that several columns contained blank or "Not Available" rows rather than correctly formatted "NA" rows, so these were first converted to "NA" before using the visna function in the extracat package to examine the missing data.
+
+```{r, fig.width=8, fig.height=12}
+hosp[hosp==""] <- NA
+hosp[hosp=="Abortion Record - Facility Name Redacted"] <- NA
+hosp[hosp=="Not Available"] <- NA
+hosp[hosp=="NA"] <- NA
+hosp[hosp=="Not Applicable"] <- NA
+hosp <- droplevels.data.frame(hosp)
+visna(hosp, tp=TRUE)
+```
+
+It appears that most variables are almost always present, with the most signficant exceptions in "Other Provider License Number" and "Payment Typology 3". This is reasonable as there may truly not be more than one payment typology ("Payment Typology 2" is also often missing, while "Payment Typology 1" is always available). A similar expectation applies to "Other Provider License Number" -  there would not always be a provider beyond the attending provider if an admission is simple and non-surgical, as indicated by the fact that "Operating Provider License Number" is often frequently missing. The other missingness patterns seemed as though they may have been explained by the redacted variables in abortion records. As such, my first step in working with the data was to remove all records of abortions. While investigating abortions in New York State would be another interesting project, it is not directly relevant to my analysis and the level of missing data in these 3,475 records became a problem in later analysis. I then ran a second missingness analysis on the data to determine what level of missing data continued beyond the abortion records.
+
+```{r, fig.width=10, fig.height=10}
+abortions <- hosp[which(hosp$Abortion.Edit.Indicator=="Y"),]
+hosp_clean <- hosp[which(hosp$Abortion.Edit.Indicator=="N"),]
+
+visna(hosp_clean, tp=TRUE)
+```
+
+The abortion records appear to have been the only records with missing location information, as the block of missing data in the Service Area, County, and Facility variables has disappeared. The large number of missing zip codes is explained in the documentation: zip-3 is "Blank for: population size less than 20,000, abortion records, or cell size less than 10 on population classification strata." The missing values in the APR Risk of Mortality and APR Severity of Illness Description variables, and the missing Type of Admission, are the only remaining unexplained issues with missing data. I selected these records in two groups to investigate similarities in those records missing Risk of Mortality and Severity of Illness and in those missing Type of Admission.
+
+```{r}
+missing_inv <- hosp_clean[which(is.na(hosp_clean$APR.Severity.of.Illness.Description)),]
+missing_type <- hosp_clean[which(is.na(hosp_clean$Type.of.Admission)),]
+```
+
+Upon examination, the 49 records missing Risk of Mortality and Severity of Illness appear to have invalid diagnosis codes assigned to them that could not be placed into a group or assigned a severity of illness or mortality coding, and the majority are related to birth. The other variables do appear to be available for these records, but it does seem to point to some small level of data entry error in the dataset. Additionally, while there was very little unifying the records missing the Type of Admission, they did appear to all come from a small subset of hospitals. From the documentation, it appears that data is submitted by hospitals via the Health Commerce System (https://www.health.ny.gov/statistics/sparcs/data_collection.htm). Having worked with hospital data and EMR systems, it seems unavoidable that there would be some error inherent in collecting this data, which would likely result in invalid types of admission and diagnosis codes. The vast majority of the dataset seems to be of good quality in regards to presence of data.  
+However, several other issues became apparent during preliminary analysis of the data: the fact that New York county was labeled as Manhattan county (which did not match the population dataset I used for ratio analysis of admissions/hospitals to population), the way in which the length of stay for admissions longer than 120 days was recorded, and the currency columns for Total Charges and Total Costs being read as factors. Replacing Manhattan with New York in the Hospital county column was a simple replacement. I chose to re-code the admissions with a length of stay of "120 +" days as 120. While this may not be the perfect option, there were so few admissions of this length (1,852 total, or 0.08% of the dataset) that this was a feasible substitution. Finally, I removed the dollar signs from the currency columns using the lucr package in order to create numeric vectors for use in analysis. 
+
+```{r}
+hosp_clean$Length.of.Stay <- lapply(hosp_clean$Length.of.Stay, gsub, pattern = "120 +", replacement = "120", fixed = TRUE)
+hosp_clean$Length.of.Stay <- as.numeric(as.character(hosp_clean$Length.of.Stay))
+
+hosp_clean$Hospital.County <- lapply(hosp_clean$Hospital.County, gsub, pattern = "Manhattan", replacement = "New York", fixed = TRUE)
+hosp_clean$Hospital.County <- as.factor(as.character(hosp_clean$Hospital.County))
+
+hosp_clean$Total.Charges <- from_currency(hosp_clean$Total.Charges, decimal_delim = ".")
+
+hosp_clean$Total.Costs <- from_currency(hosp_clean$Total.Costs, decimal_delim = ".")
+
+hosp_clean <- droplevels.data.frame(hosp_clean)
+```
+
+In examining the other variables, there were a few other inherent data quality issues. For instance, Gender had only three options for female, male, and unknown. Documentation of gender identity, particularly gender-queer, transgender, and other non-gender-conforming identities is a known issue for medical data. As far as I am aware, the vast majority of the EMR systems in use in the United States do not allow for users to record gender identities other than female, male, and unknown/indeterminate. It does not come as a surprise that this dataset suffers from the same issues. Race and Ethnicity have similar problems, with Race recorded as White, African-American/Black, Other Race, or Multi-Racial and Ethnicity as Not Spanish/Hispanic, Spanish/Hispanic, Multi-Ethnic, or Unknown. These are very limited categories, especially given the racial and ethnic diversity of New York State. While these demographic issues are not problematic for my analysis, they are reflective of larger, systemic issues in the collection of demographic data, particularly in the medical field.  
+The remaining variables had been consistently coded, owing likely to the data collection process, and there were no issues with misspellings or other common data issues. In attempting analysis of diagnoses, I discovered that the Major Diagnostic Category names were far too long for plotting. As such, I renamed these fields with shortened names for analysis.
+
+```{r}
+hosp_clean$APR.MDC.Description <- gsub("Alcohol/Drug Use and Alcohol/Drug Induced Organic Mental Disorders","Alcohol/Drug Use",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of Blood, Blood Forming Organs and Immunological Disorders","Blood/Immunological Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Circulatory System","Circulatory Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Digestive System","Digestive Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Eye","Eye Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Female Reproductive System","Female Reproductive Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Hepatobiliary System and Pancreas","Hepatobiliary/Pancreatic Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Kidney and Urinary Tract","Kidney/Urinary Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Male Reproductive System","Male Reproductive Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Musculoskeletal System and Conn Tissue","Musculoskeletal Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Nervous System","Nervous System Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Respiratory System","Respiratory Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Diseases and Disorders of the Skin, Subcutaneous Tissue and Breast","Skin/Breast Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Ear, Nose, Mouth, Throat and Craniofacial Diseases and Disorders","ENT/Cranofacial Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Endocrine, Nutritional and Metabolic Diseases and Disorders","Endocrine/Metabolic Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Human Immunodeficiency Virus Infections","HIV/AIDS",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Infectious and Parasitic Diseases, Systemic or Unspecified Sites","Infections/Parasites",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Lymphatic, Hematopoietic, Other Malignancies, Chemotherapy and Radiotherapy","Circulatory Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Mental Diseases and Disorders","Mental Disorders",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Multiple Significant Trauma","Trauma",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Newborns and Other Neonates with Conditions Originating in the Perinatal Period","Neonate Conditions",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Poisonings, Toxic Effects, Other Injuries and Other Complications of Treatment","Treatment Complications",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Pre-MDC or Ungroupable","Ungroupable",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Pregnancy, Childbirth and the Puerperium","Pregnancy/Birth",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- gsub("Rehabilitation, Aftercare, Other Factors Influencing Health Status and Other Health Service Contacts","Rehab/Aftercare",hosp_clean$APR.MDC.Description)
+hosp_clean$APR.MDC.Description <- as.factor(as.character(hosp_clean$APR.MDC.Description))
+```
+
+Overall, this dataset did not require a large amount of cleaning before performing analyses and appears to provide complete and accurate data. 
+
+#Executive Summary
+  In 2014, there were 2,365,208 inpatient admissions to hospitals in New York State, occurring at 215 different hospitals. The diagnoses associated with these admissions ranged from organ transplantation to schizophrenia to false labor. From the vast amount of data associated with these admissions, there are a number of questions one can begin to answer; firstly, whether the number of hospital admissions in a year is correlated with population.
+```{r, fig.height=6, fig.width=8.5, echo=FALSE}
+pop <- read.csv(file='ny_pop.csv',header=TRUE,sep=",")
+
+total <- group_by(hosp_clean, Health.Service.Area, Hospital.County)
+total <- count(total, c(Health.Service.Area))
+
+pop <- merge(total, pop, by="Hospital.County")
+
+pop$Proportion <- pop$n/pop$Population
+
+
+counties <- county.fips[grep("^new york", county.fips$polyname),]
+counties$polyname <- lapply(counties$polyname, gsub, pattern = "new york.", replacement = "")
+counties$polyname = str_to_title(gsub(",", " ", counties$polyname))
+colnames(counties)[2] <- "Hospital.County"
+
+counties <- merge(counties,pop, by="Hospital.County")
+
+county <- map_data('county','new york')
+county$subregion = str_to_title(gsub(",", " ", county$subregion))
+colnames(county)[6] <- "Hospital.County"
+
+ny_map <- inner_join(counties,county,by="Hospital.County")
+
+ggplot(ny_map, aes(x=long, y=lat, group=group)) + geom_polygon(aes(fill=Proportion), color="white") + scale_fill_viridis(name="Ratio") + theme_bw() + theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank(), panel.border = element_blank(), plot.title = element_text(hjust = 0.5, size=16), legend.text = element_text(size=12), legend.title = element_text(size=14)) + ggtitle("Ratio of Hospital Inpatient Admissions to Population, by County (2014)")
+```
+Five counties in New York State did not have hospitals submitting data in 2014. The remainder of the counties ranged from a 1:4 admissions to resident persons ratio (i.e. Manhattan/New York county) to a 1:100 admissions to resident person ratio (i.e. Essex county). This demonstrates that the number of hospital admissions does not depend solely on the population of an area, and that there may be other factors involved, such as demographics and urban/suburban/rural status.  
+In terms of demographics, the data showed that those in older age brackets had a higher number of hospital admissions, with persons over 50 making up 54% of admissions. Women were admitted to the hospital more often than men, comprising 56% of the inpatient admissions in 2014. New York State also had more admissions of White persons than any other racial category (56%), and the vast majority of patients were non-Hispanic (82%).  
+The largest number of people were admitted to the hospital for circulatory disorders, accounting for 14% of admissions. However, the admitting diagnoses varied significantly between men and women.
+
+```{r, fig.height=8, fig.width=8, echo=FALSE}
+hosp_clean$APR.MDC.Description <- factor(hosp_clean$APR.MDC.Description, levels=names(sort(table(hosp_clean$APR.MDC.Description))))
+
+ggplot(hosp_clean[which(hosp_clean$Gender != "U" & hosp_clean$APR.MDC.Description != "Ungroupable"),], aes(APR.MDC.Description, fill=Gender)) + geom_bar(stat="count", position=position_dodge()) + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + ggtitle("Admissions by Gender and Diagnosis") + theme(axis.text = element_text(size=12), legend.position = "bottom", axis.title = element_text(size=14), plot.title = element_text(size=16), legend.title = element_text(size=13)) + coord_flip() + scale_fill_manual(values=c(rgb(0/255,158/255,115/255),rgb(230/255,159/255,0/255)))
+```
+The second largest group of admissions in 2014 was for pregnancy/birth - conditions only applicable to women, which seems to explain why more women were admitted to hospitals than men. Of the diagnostic categories showing gender discrepancies, several were notable. A significantly larger number of men were admitted for circulatory disorders and alcohol/drug use, while a larger number of women than men were admitted for musculoskeletal and endocrine/metabolic disorders. It appears from the data that some conditions disproportionately affect one gender - or, one gender is more likely to seek treatment requiring hospitalization for a condition than another.  
+The average length of stay for all admissions was 5.5 days, with about 82% of inpatient admissions lasting 7 days or less. 
+```{r, fig.height=10, fig.width=8.5, echo=FALSE}
+los_plot <- hosp_clean[which(hosp_clean$APR.MDC.Description != "Ungroupable"),]
+ggplot(los_plot, aes(x=reorder(APR.MDC.Description,Length.of.Stay,median), y=Length.of.Stay)) + geom_boxplot(outlier.alpha=0.5) + coord_flip() + theme_bw() + theme(axis.text = element_text(size=12), plot.title = element_text(size=16), axis.title = element_text(size=14)) + xlab("Major Diagnostic Category") + ylab("Length of Stay (Days)") + ggtitle("Length of Stay by Diagnosis")
+```
+Those admissions with the longest average length of stay were rehab/aftercare admissions, followed closely by mental disorders and trauma. Infections/parasites, HIV/AIDS, and burns also had relatively high admissions lengths, owing perhaps to the large number of co-occurring conditions inherent in these diagnosis categories. The shortest lengths of stay were for pregnancy/birth and neonate conditions. 
+
+
+#Main Analysis
+  
+##Patient Population
+  I began by looking at the demographics of the patients represented in the dataset before performing further analysis. 
+```{r}
+ggplot(hosp_clean, aes(Gender)) + geom_bar(stat="count", fill="steelblue") + scale_y_continuous(labels=function(x)x/1000) + xlab("Gender") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by Gender") + theme(axis.text = element_text(size=10))
+```
+```{r}
+table(hosp_clean$Gender)
+```
+More women than men were admitted to hospitals in New York State in 2014, with this dataset containing 56% females and 44% males. There were 66 persons of unknown gender. I chose to leave these in for the analysis as, despite the small number of them, I was curious if there were underlying factors causing the gender variable to be missing. It did not appear to be the case that there were from preliminary analysis in the data quality section, and I did not discover anything further in my analysis.
+```{r}
+ggplot(hosp_clean, aes(Race)) + geom_bar(stat="count", fill="cadetblue3") + scale_y_continuous(labels=function(x)x/1000) + xlab("Race") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by Race") + theme(axis.text = element_text(size=10))
+```
+```{r}
+table(hosp_clean$Race)
+```
+
+The majority of admissions were of white patients (56%), with the next largest category being those of another race (23%), followed by black patients (19%), and a small number of multi-racial patients (0.3%). Race is the demographic category where this dataset is most limited - these broad categories provide very little information on the cohort composition, especially with so many patients categorized as being another race. As such, I chose not to use race as a variable in further analysis.
+```{r}
+ggplot(hosp_clean, aes(Ethnicity)) + geom_bar(stat="count", fill="cornflowerblue") + scale_y_continuous(labels=function(x)x/1000) + xlab("Ethnicity") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by Ethnicity") + theme(axis.text = element_text(size=10))
+```
+```{r}
+table(hosp_clean$Ethnicity)
+```
+Ethnicity showed the least variation of the demographic variables, with the vast majority of admissions being of patients identifying as not Spanish/Hispanic (82%). 12% of admissions were of Spanish/Hispanic ethnicity, the next largest group, with less than half as many marked as unknown (5%), and very few as multi-ethnic (0.2%). These are standard categories for collecting ethnicity, and I was surprised by the relatively small number with unknown ethnicity. In the EMR data I work with on a daily basis, ethnicity is unknown over 50% of the time. However, I due to the fact that the so many patients identified as not Spanish/Hispanic, I chose to leave this variable out of further analysis as well.
+```{r}
+ggplot(hosp_clean, aes(Age.Group)) + geom_bar(stat="count", fill="darkcyan") + scale_y_continuous(labels=function(x)x/1000) + xlab("Age Group") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by Age Group") + theme(axis.text = element_text(size=10))
+```
+```{r}
+table(hosp_clean$Age.Group)
+```
+It is first important to note that this dataset used unequal age ranges, most likely to account for the variability in likelihood of hospitalization between different age ranges. However, this does make it difficult to perform proportional analyses. It would be best if this data were provided with actual ages, rather than ranges.  
+The largest number of admissions were of patients 50 to 69 years old or 70 or older. In total, those over 50 make up about 54% of the admissions to hospitals in New York State in 2014. This is not surprising, as many conditions requiring hospitalization disporportionately affect the older populations due to the natural effects of aging. The next largest group was 30 to 49 year olds (19%), followed by 0 to 17 year olds (15%). 18 to 29 year olds made up 11% of the records. Many of the 0 to 17 year olds are neonates admitted following birth, contributing to the large drop from 0 to 17 year olds to 18 to 29 year olds (which is most likely also due in part to the smaller year range of this group than the other groups).  
+
+```{r}
+vcd::mosaic(Gender ~ Age.Group, data=droplevels.data.frame(hosp_clean[which(hosp_clean$Gender != "U"),]), direction=c('v','h'), zero_size=0, colorize=TRUE, gp = gpar(fill=matrix(c(rgb(0/255,158/255,115/255),rgb(230/255,159/255,0/255)))), rot_labels=c(15,0,0,90), main="Gender by Age Group")
+```
+The gender distribution of each age group was quite different, with those between 0 and 17 years of age or 50 and 69 years of age approximately equally distributed between the genders. As nearly all newborns are hospitalized, and there is a nearly even proportion of female and male newborn babies, it is expected that this would be an approximately even split. Women between 50 and 69 are very unlikely to be giving birth, which appears from the diagnostic codes examined next to be the main cause of the larger proportion of women in the 18 to 29 and 30 to 49 groups. Women also live longer than men, leading to a higher proportion of women in the over 70 age group, in turn leading to a higher number of hospitalizations of women.  
+As a great deal of the zip code data was missing, and given that it was only zip-3 data and not filled in for out of state patients, I chose not to perform analysis on this last demographic variable.
+
+##Diagnoses
+  The second question I set out to address was regarding diagnoses - with which conditions were patients most often admitted to hospitals in New York State in 2014?
+  The dataset included several different diagnosis coding systems, including CCS (Clinical Classification Software) Codes/Descriptions APR (All Patient Refined) DRG (Diagnosis Related Groups) Codes/Descriptions. Both of these were far too specific for my exploratory analysis, with CCS codes including 262 different categories and APR DRG codes 316 categories. As such, I chose to focus on the APR MDC (Major Diagnostic Category) coding system which condenses the diagnoses in the APR DRG system into 25 different categories, including one category for Ungroupable diagnoses (as mentioned in the data quality section, there was a neglible number of these, but I left them in the dataset for analysis). 
+  
+```{r}
+hosp_clean$APR.MDC.Description <- factor(hosp_clean$APR.MDC.Description, levels=names(sort(table(hosp_clean$APR.MDC.Description))))
+
+ggplot(hosp_clean, aes(APR.MDC.Description)) + geom_bar(stat="count", fill="deepskyblue") + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by Major Diagnostic Category") + theme(axis.text = element_text(size=10)) + coord_flip()
+```
+The largest number of admissions were for circulatory disorders, with over 300,000 inpatient admissions in 2014. These admissions were primarily related to heart failure, as seen in the table below, which is reasonable as the leading cause of death for American adults is heart failure and related conditions. Heart failure and similar issues are also medical issues that are more likely to require hospitalization than issues with more minor organs.
+
+```{r}
+circ <- hosp_clean[which(hosp_clean$APR.MDC.Description == "Circulatory Disorders"),]
+sort(table(circ$APR.DRG.Description),decreasing=TRUE)[1:10]
+```
+
+The second and third highest diagnostic categories of admissions were both related to birth, with around 250,000 admissions related to pregnancy and childbirth, and around 240,000 admissions of neonates. Of the pregnancy/birth admissions, about 225,000 were vaginal or cesarean deliveries. The table below shows the 10 most common diagnoses associated with the pregnancy/birth MDC.
+
+```{r}
+preg <- hosp_clean[which(hosp_clean$APR.MDC.Description == "Pregnancy/Birth"),]
+sort(table(preg$APR.DRG.Description),decreasing=TRUE)[1:10]
+```
+
+The admissions in the neonate conditions category were primarily admissions of newborns with no anomalies (around 200,000 of the 240,000 admissions). As newborns are commonly admitted to the hospital for at least a day following birth, it was expected that this would comprise a large portion of the dataset. The remaining admissions in this category were of premature infants or infants with congenital/perinatal conditions. 
+
+```{r}
+neo <- hosp_clean[which(hosp_clean$APR.MDC.Description == "Neonate Conditions"),]
+sort(table(neo$APR.DRG.Description),decreasing=TRUE)[1:10]
+```
+The next most common categorizations were musculoskeletal disorders, digestive disorders, and respiratory disorders. All three of these had around 200,000 admissions in 2014. The largest diagnosis categories within musculoskeletal disorders were hip and knee joint replacements, shown below. Many admissions in this group were also due to various back and neck injuries and disorders. 
+
+```{r}
+musc <- hosp_clean[which(hosp_clean$APR.MDC.Description == "Musculoskeletal Disorders"),]
+sort(table(musc$APR.DRG.Description),decreasing=TRUE)[1:10]
+```
+In the respiratory disorders MDC, the higest numbers admissions were due to pneumonia, COPD, or asthma. Other respiratory infections were also included in this group, along with pulmonary edema and embolism. 
+```{r}
+resp <- hosp_clean[which(hosp_clean$APR.MDC.Description == "Respiratory Disorders"),]
+sort(table(resp$APR.DRG.Description),decreasing=TRUE)[1:10]
+```
+There was no clear majority among the digestive disorder admissions, though slightly more fell into the non-bacterial gastroenteritis and major bowel procedures categories. It also appears that many digestive disorders are not well defined even within the more specific diagnosis codes, as many fell into "Other" categories.   
+```{r}
+dig <- hosp_clean[which(hosp_clean$APR.MDC.Description == "Digestive Disorders"),]
+sort(table(dig$APR.DRG.Description),decreasing=TRUE)[1:10]
+```
+###Gender and Major Diagnostic Category
+I next investigated whether there was any difference between the genders in admissions by MDC, which I began to discuss briefly in the executive summary.
+```{r, fig.height=8, fig.width=8}
+ggplot(hosp_clean[which(hosp_clean$Gender != "U"),], aes(APR.MDC.Description, fill=Gender)) + geom_bar(stat="count", position=position_dodge()) + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + ggtitle("Number of Admissions by Gender and Major Diagnostic Category") + theme(axis.text = element_text(size=10), legend.position = "bottom") + coord_flip() + scale_fill_manual(values=c(rgb(0/255,158/255,115/255),rgb(230/255,159/255,0/255)))
+```
+With the obvious exceptions of pregnancy/birth, female reproductive disorders, and male reproductive disorders, the majority of the MDCs showed approximately equal representation of both genders. I removed the "Unknown" gender for the above chart, as it was too small of a category to show on any MDCs and it threw off the scaling. Discrepancies between the genders were apparent in circulatory and mental disorders, where more men than women were admitted, and in musculoskeletal, digestive, endocrine/metabolic, and respiratory disorders, where more women than men were admitted. The largest discrepancy was in alcohol/drug use, where about three times as many men as women were admitted. In order to investigate this, I created a bar chart showing the diagnoses within the alcohol/drug use MDC by gender. I first cleaned the diagnosis descriptions and grouped those with very few cases into an "Other" category.
+
+```{r}
+alc <- hosp_clean[which(hosp_clean$APR.MDC.Description == "Alcohol/Drug Use"),]
+alc$APR.DRG.Description <- gsub("^TRACHEOSTOMY W MV 96\\+ HOURS W/O EXTENSIVE PROCEDURE","Other",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("TRACHEOSTOMY W MV 96\\+ HOURS W EXTENSIVE PROCEDURE OR ECMO","Other",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("OTHER DRUG ABUSE & DEPENDENCE","Other Drug Abuse/Dependence",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("OPIOID ABUSE & DEPENDENCE","Opioid Abuse/Dependence",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("COCAINE ABUSE & DEPENDENCE","Cocaine Abuse/Dependence",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("ALCOHOL ABUSE & DEPENDENCE","Alcohol Abuse/Dependence",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("NONEXTENSIVE PROCEDURE UNRELATED TO PRINCIPAL DIAGNOSIS","Other",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("MODERATELY EXTENSIVE PROCEDURE UNRELATED TO PRINCIPAL DIAGNOSIS","Other",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("EXTENSIVE PROCEDURE UNRELATED TO PRINCIPAL DIAGNOSIS","Other",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("DRUG & ALCOHOL ABUSE OR DEPENDENCE, LEFT AGAINST MEDICAL ADVICE","Alcohol/Drug Dependence, LAMA",alc$APR.DRG.Description)
+alc$APR.DRG.Description <- gsub("ALCOHOL & DRUG DEPENDENCE W REHAB OR REHAB/DETOX THERAPY","Alcohol/Drug Dependence, Rehab/Detox",alc$APR.DRG.Description)
+
+alc$APR.DRG.Description <- factor(alc$APR.DRG.Description, levels=names(sort(table(alc$APR.DRG.Description))))
+
+ggplot(alc, aes(APR.DRG.Description, fill=Gender)) + geom_bar(stat="count", position=position_dodge()) + coord_flip() + scale_fill_manual(values=c(rgb(0/255,158/255,115/255),rgb(230/255,159/255,0/255))) + xlab("Diagnosis") + ylab("Count of Admissions (in Thousands)") + ggtitle("Alcohol/Drug Admissions by Gender and Diagnosis") + theme(axis.text = element_text(size=10), legend.position = "bottom") + scale_y_continuous(labels=function(x)x/1000)
+```
+Of the around 75,000 admissions for alcohol/drug use, about 56,000 (75%) were of males and 19,000 (25%) were of females. The majority of these were for alcohol abuse/dependence, with about 18,000 male patients admitted for this in 2014 and 5,000 female patients. Across all of the alcohol/drug related diagnoses, more men were admitted than women. This discrepancy was largest for alcohol abuse/dependence, alcohol/drug dependence, LAMA (left against medical advice), cocaine abuse/dependence, and opioid abuse/dependence. It appears that, regardless of the actual statistics on alcohol/drug use, men are about three times as likely as women to be admitted to the hospital in New York State for these conditions, and they are also more likely to choose to leave the facility against medical advice rather than enroll in rehab/detox. Women admitted for alcohol/drug dependence are about as likely as not to remain in rehab/detox programs. However, it is important to note that this is just one year of data, and may not be providing a full representative sample from which to draw conclusions.  
+
+###Age and Major Diagnostic Category
+Completing my analysis of diagnoses, I looked at Major Diagnostic Category by age in order to investigate whether some of my initial ideas about what diagnoses commonly affect what age groups were correct, subsetting the data and creating five separate bar charts.
+```{r}
+zero <- hosp_clean[which(hosp_clean$Age.Group == "0 to 17"),]
+eighteen <- hosp_clean[which(hosp_clean$Age.Group == "18 to 29"),]
+thirty <- hosp_clean[which(hosp_clean$Age.Group == "30 to 49"),]
+fifty <- hosp_clean[which(hosp_clean$Age.Group == "50 to 69"),]
+seventy <- hosp_clean[which(hosp_clean$Age.Group == "70 or Older"),]
+
+zero$APR.MDC.Description <- factor(zero$APR.MDC.Description, levels=names(sort(table(zero$APR.MDC.Description))))
+eighteen$APR.MDC.Description <- factor(eighteen$APR.MDC.Description, levels=names(sort(table(eighteen$APR.MDC.Description))))
+thirty$APR.MDC.Description <- factor(thirty$APR.MDC.Description, levels=names(sort(table(thirty$APR.MDC.Description))))
+fifty$APR.MDC.Description <- factor(fifty$APR.MDC.Description, levels=names(sort(table(fifty$APR.MDC.Description))))
+seventy$APR.MDC.Description <- factor(seventy$APR.MDC.Description, levels=names(sort(table(seventy$APR.MDC.Description))))
+
+ggplot(zero, aes(APR.MDC.Description)) + geom_bar(stat="count", fill="firebrick1") + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by MDC, 0-17 Years Old") + theme(axis.text = element_text(size=10)) + coord_flip()
+```
+Children between 0 and 17 years of age were most likely to be admitted to the hospital as newborns, with this MDC representing the vast majority of admissions. The next highest category was respiratory disorders, likely primarily due to childhood asthma. As this age group is generally healthy, no other admission category stood out for its size. As an aside, the very small number of HIV/AIDS admissions points to the success of New York State in preventing perinatal transmission of HIV from seropositive mothers to their children.
+
+```{r}
+ggplot(eighteen, aes(APR.MDC.Description)) + geom_bar(stat="count", fill="darkorange") + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by MDC, 18-29 Years Old") + theme(axis.text = element_text(size=10)) + coord_flip()
+```
+The majority of admissions in the 18 to 29 years old group were for pregnancy/birth, as this age range encompasses a large portion of women's childbearing years. The next highest category was mental disorders, comprising a much larger portion of admissions than in the general population. Alcohol/drug use also had a more significant number of admissions than among all age groups, perhaps pointing to a propensity among young adults (particularly in college) to abuse drugs and alcohol; however, alcohol/drug use remained a prevalent diagnosis in other age groups as well. There were a very small number of admissions for neonate conditions which may be miscodings of pregnancy/birth related conditions.
+```{r}
+ggplot(thirty, aes(APR.MDC.Description)) + geom_bar(stat="count", fill="forestgreen") + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by MDC, 30-49 Years Old") + theme(axis.text = element_text(size=10)) + coord_flip()
+```
+As with the 18 to 29 age group, the largest group of admissions for 30 to 49 year olds was for pregnancy/birth, and the second largest was mental disorders. It is unclear from the analysis completed here why mental disorders seem to make up a relatively large proportion of admissions among 18 to 39 year olds when compared to the general population. The remainder of the categories closely follow the proportions of the total dataset, though there are again a few likely miscoded MDCs for neonate conditions.
+```{r}
+ggplot(fifty, aes(APR.MDC.Description)) + geom_bar(stat="count", fill="deepskyblue") + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by MDC, 50-69 Years Old") + theme(axis.text = element_text(size=10)) + coord_flip()
+```
+As the cohort ages past 50, the largest category of admitting diagnosis becomes circulatory disorders, followed by other systemic disorders such as musculoskeletal, digestive, and respiratory disorders. As this age group has a high rate of heart issues and joint replacements, these categories made sense. Mental disorders moved down significantly in proportion of admissions for this population. Infections/parasites became more common, perhaps due to the weakening of the immune system with age.
+```{r}
+ggplot(seventy, aes(APR.MDC.Description)) + geom_bar(stat="count", fill="purple1") + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by MDC, 70+ Years Old") + theme(axis.text = element_text(size=10)) + coord_flip()
+```
+Finally, those admitted at over 70 years of age were primarily admitted for circulatory disorders. Other systemic disorders remained predominant, with infections/parasites becoming more common in this population. There was a surprisingly small number of admissions for mental disorders - I would have expected more given the prevalence of dementia and similar conditions among the elderly. Alcohol/drug use dropped nearly to the bottom of the list of most frequent admitting diagnoses.  
+I also attempted to look at admitting diagnosis by race and ethnicity, but found that there was too much variation in the group sizes to draw any meaningful insights. 
+
+##Hospitals and Regions
+After looking at diagnoses, I chose to look at whether there were differences in the common diagnostic categories across health service regions, and at the individual hospitals. 
+```{r}
+ggplot(hosp_clean, aes(Health.Service.Area)) + geom_bar(stat="count", fill="darkmagenta") + scale_y_continuous(labels=function(x)x/1000) + xlab("Health Service Area") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by Health Service Area") + theme(axis.text.x = element_text(size=10, angle = 45, hjust=1), axis.text.y = element_text(size=10))
+```
+Unsurprisingly, the largest number of admissions was in New York City, followed by Long Island and the Hudson Valley. The Southern Tier had the lowest number of admissions, with the other four health service areas showing approximately equal numbers of inpatient admissions in 2014. 
+###Admissions by Region
+While the larger population of New York City, Long Island, and the Hudson Vally somewhat explains the higher numbers of admissions, population cannot be the only factor involved, as is clear from the heatmap included in the executive summary.
+
+```{r, fig.height=6, fig.width=8.5}
+pop <- read.csv(file='ny_pop.csv',header=TRUE,sep=",")
+
+total <- group_by(hosp_clean, Health.Service.Area, Hospital.County)
+total <- count(total, c(Health.Service.Area))
+
+pop <- merge(total, pop, by="Hospital.County")
+
+pop$Proportion <- pop$n/pop$Population
+
+
+counties <- county.fips[grep("^new york", county.fips$polyname),]
+counties$polyname <- lapply(counties$polyname, gsub, pattern = "new york.", replacement = "")
+counties$polyname = str_to_title(gsub(",", " ", counties$polyname))
+colnames(counties)[2] <- "Hospital.County"
+
+counties <- merge(counties,pop, by="Hospital.County")
+
+county <- map_data('county','new york')
+county$subregion = str_to_title(gsub(",", " ", county$subregion))
+colnames(county)[6] <- "Hospital.County"
+
+ny_map <- inner_join(counties,county,by="Hospital.County")
+
+ggplot(ny_map, aes(x=long, y=lat, group=group)) + geom_polygon(aes(fill=Proportion), color="white") + scale_fill_viridis(name="Ratio") + theme_bw() + theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank(), panel.border = element_blank(), plot.title = element_text(hjust = 0.5, size=16), legend.text = element_text(size=10), legend.title = element_text(size=13)) + ggtitle("Ratio of Hospital Inpatient Admissions to Population, by County (2014)")
+```
+I was unfortunately unable to put the borders of the Health Service Areas onto the map above, though they would have provided a nice understanding of where each group represented in the bar chart falls geographically. Given the unexpected ratios in the map above, I created a second heatmap to look at the ratio of admissions to hospitals in each county.
+```{r, fig.height=6, fig.width=8.5}
+hospitals <- data.frame(hosp_clean$Hospital.County, hosp_clean$Facility.Id)
+deduped_hospitals <- unique(hospitals)
+colnames(deduped_hospitals)[1] <- "Hospital.County"
+count_hosp <- count(deduped_hospitals, Hospital.County)
+hosp_prop <- merge(total, count_hosp, by="Hospital.County")
+
+hosp_prop$Proportion <- hosp_prop$n.x/hosp_prop$n.y
+
+hosp_prop_map <- merge(counties,hosp_prop, by="Hospital.County")
+
+hosp_prop_map <- inner_join(hosp_prop_map,county,by="Hospital.County")
+
+ggplot(hosp_prop_map, aes(x=long, y=lat, group=group)) + geom_polygon(aes(fill=Proportion.y), color="white") + scale_fill_viridis(name="Ratio") + theme_bw() + theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank(), panel.border = element_blank(), plot.title = element_text(hjust = 0.5, size=16), legend.text = element_text(size=10), legend.title = element_text(size=13)) + ggtitle("Ratio of Hospital Inpatient Admissions to Hospitals, by County (2014)")
+```
+The number of hospitals in each county does not appear to have a direct correlation with the number of admissions, either. There is still a higher ratio in Manhattan than in any other county, though there are also high ratios in Queens, Long Island, and Monroe counties. Again, it is outside the scope of this analysis to determine why there were so many admissions in these counties in 2014, but it is interesting to note that the ratio of admissions to hospitals is not at all consistent across the state.
+
+###Diagnoses by Region
+While my analysis of the number of admissions by region/county was not particularly productive in answering any questions, I continued looking at the regions provided in the dataset to see if some diagnoses were more prevalent in one area than another.
+```{r, fig.height=8, fig.width=10}
+ggplot(hosp_clean, aes(APR.MDC.Description)) + geom_bar(stat="count", fill="deepskyblue") + scale_y_continuous(labels=function(x)x/1000) + xlab("Major Diagnostic Category") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Number of Admissions by Major Diagnostic Category") + theme(axis.text = element_text(size=10)) + coord_flip() + facet_wrap(~Health.Service.Area, nrow=1, scales="free_x")
+```
+While circulatory disorders remained the most frequent major diagnostic category for admissions in each health service area, there was some variation among the remainder of the categories. For instance, pregnancy/birth and neonate conditiosn were less common in Long Iland, with more digestive disorders, and in the Capital/Adiron, with more musculoskeletal disorders. HIV/AIDS was more common in New York City than in other regions, as expected, though alcohol/drug use was most common in the Hudson Valley (I had expected this to be larger in New York City as well). There were also more mental disorder admissions in the Hudson Valley. Overall, while admission category prevalence remained relatively constant across health service areas, there were some interesting differences that would require great analysis to investigate fully. 
+
+##Length of Stay
+I next began investigating questions related to length of stay, first what the average length of stay was for a patient admitted to the hospital, and then whether diagnosis had any impact on this length of stay.
+
+```{r}
+ggplot(hosp_clean, aes(x="",y=Length.of.Stay)) + geom_violin(bw=0.8, fill="pink4", color="pink4") + geom_boxplot(outlier.shape = NA, width=0.1) + coord_flip() + theme_bw() + theme(axis.text = element_text(size=10)) + xlab("") + ylab("Length of Stay (Days)") + ggtitle("Length of Stay")
+```
+```{r}
+summary(hosp_clean$Length.of.Stay)
+```
+The shortest length of stay in the dataset was 1 day, with over half of the admissions being three days or less. The average length of stay was approximately 5.5 days, owing to the large right skew of the distribution. The slight concentration appearing at 120 days is most likely due to the fact that lengths of stay were entered in one day increments up to 120 days, and that I recoded all "120+" lengths of stay to be 120 days.
+
+###Length of Stay by Major Diagnostic Category
+
+```{r, fig.height=10, fig.width=8}
+ggplot(hosp_clean, aes(x=reorder(APR.MDC.Description,Length.of.Stay,median), y=Length.of.Stay)) + geom_boxplot(outlier.alpha=0.5) + coord_flip() + theme_bw() + theme(axis.text = element_text(size=10)) + xlab("Major Diagnostic Category") + ylab("Length of Stay (Days)") + ggtitle("Length of Stay by Major Diagnostic Category")
+```
+Interestingly, every MDC, with the exceptions of eye disorders and the ungroupable diagnoses, had at least one admission with a length of stay over 120 days. I had expected to see more clustering of these long lengths of stay among a few of the MDCs. The highest median length of stay was for rehab/aftercare admissions, which is expected given the nature of rehabilitation programs. The next highest median was for mental disorders, which is again reasonable given that many mental conditions do not have simple treatments and may take more time in an inpatient setting for treatment. The mental disorders MDC also had many high outliers, creating a more or less continuous line from 20 days to 120 days. The third highest median length of stay was for trauma admissions, though this MDC did not have as many high outliers as the rehab and mental disorder categories. Infections/parasites, HIV/AIDS, and burns also showed high median lengths of stay.  
+
+```{r, fig.height=10, fig.width=10}
+inlier_los <- hosp_clean[which(hosp_clean$Length.of.Stay <= 30),]
+ggplot(inlier_los, aes(Length.of.Stay)) + geom_density(bw=0.8) + theme_bw() + theme(axis.text = element_text(size=10)) + xlab("Major Diagnostic Category") + ylab("Length of Stay (Days)") + ggtitle("Length of Stay by Major Diagnostic Category") + facet_wrap(~reorder(APR.MDC.Description,-Length.of.Stay,median)) + guides(color=FALSE)
+```
+I chose to set a cut off at 30 days to look at a subset of the lengths of stay by MDC, based on the beginning of the outliers in the rehab/aftercare subset and the beginning of the significant outliers in the entire dataset. This made up 98% of all admissions. From this subset, I created density estimates for each major diagnostic category to examine each distribution. The majority were similar - heavy right tails with peaks around 1 to 3 days. The rehab/aftercare admissions did not show this pattern, and had several smaller peaks in a more even distribution. Neonate conditions had the highest peak, followed by pregnancy/birth, demonstrating that these admissions are generally uncomplicated and require very little hospitalization. 
+
+###Length of Stay by Procedure
+
+```{r, fig.height=25, fig.width=8}
+ggplot(hosp_clean, aes(x=reorder(CCS.Procedure.Description,Length.of.Stay,mean), y=Length.of.Stay)) + geom_point(stat="summary", fun.y="mean", color="seagreen4") + theme(axis.text = element_text(size=8)) + xlab("CCS Procedure Description") + ylab("Length of Stay (Days)") + ggtitle("Mean Length of Stay by Procedure")  + guides(color=FALSE) + coord_flip()
+```
+I next investigated mean length of stay by procedure. The longest average length of stay was 40 days for tracheostomies (temporary or permanent). A tracheostomy, the insertion of a tube into the windpipe, generally is only required for extremely serious conditions, and is itself quite invasive. As such, this high average length of stay was expected. There were over 3,000 of these procedures done in 2014, so this high length of stay is not skewed by just one or two outliers. The next highest average lengths of stay were for organ transplantation, bone transplantation, and open heart surgery. Again, these are all invasive procedures only performed for serious conditions. After these four procedures, the remainder followed a smooth trajectory between 15 and 1 days(s). Tympanoplasties, or eardrum repair procedures, had the lowest average length of stay; however, there were only 16 of them performed in 2014. A more detailed analysis of length of stay by procedure and diagnosis would require an entirely separate project.
+
+###Length of Stay by Severity of Illness
+I next looked at whether there was a linear correlation between length of stay, severity of illness, and risk of mortality, removing the small number of records that were missing these last two variables. 
+```{r}
+ggplot(droplevels.data.frame(hosp_clean[which(!is.na(hosp_clean$APR.Severity.of.Illness.Description)),]), aes(Length.of.Stay)) + geom_density(bw=0.8) + geom_vline(data=droplevels.data.frame(hosp_clean[which(!is.na(hosp_clean$APR.Severity.of.Illness.Description)),]), aes(xintercept=mean(Length.of.Stay)), color="blue") + theme_bw() + theme(axis.text = element_text(size=10)) + ylab("Severity of Illness") + xlab("Length of Stay (Days)") + ggtitle("Length of Stay by Severity of Illness") + facet_wrap(~reorder(APR.Severity.of.Illness.Description,-Length.of.Stay,mean)) + guides(color=FALSE)
+```
+The more severe an illness, the higher the average length of stay. This was an expected result, with the extremely severe illnesses showing a larger distribution with a significantly less obvious peak at the low end of the length of stay. As the severity of the illness decreases, people are less likely to be admitted to the hospital as an inpatient for long periods of time, with the peak around one day growing more pronounced from major to moderate to minor illnesses. However, severity of illness does not appear entirely linearly correlated with length of stay - there are still some very long admissions for minor illnesses, though the reason for this is unclear from the dataset. All of the density estimates, with the exception of extreme severity of illness, show significant right skew, as the blue mean line is past the peak at the median.
+```{r}
+ggplot(droplevels.data.frame(hosp_clean[which(!is.na(hosp_clean$APR.Risk.of.Mortality)),]), aes(Length.of.Stay)) + geom_density(bw=0.8) + geom_vline(data=droplevels.data.frame(hosp_clean[which(!is.na(hosp_clean$APR.Risk.of.Mortality)),]), aes(xintercept=mean(Length.of.Stay)), color="forestgreen") + theme_bw() + theme(axis.text = element_text(size=10)) + ylab("Risk of Mortality") + xlab("Length of Stay (Days)") + ggtitle("Length of Stay by Risk of Mortality") + facet_wrap(~reorder(APR.Risk.of.Mortality,-Length.of.Stay,mean)) + guides(color=FALSE)
+```
+I also attempted to do this same analysis for risk of mortality (above), but found that the results were nearly identical to the severity of illness - despite the fact that risk of mortality and severity of illness are not precisely linearly correlated, as seen below.
+
+```{r}
+hosp_clean$APR.Risk.of.Mortality <- factor(hosp_clean$APR.Risk.of.Mortality, levels = c('Extreme','Major','Moderate','Minor'))
+hosp_clean$APR.Severity.of.Illness.Description <- factor(hosp_clean$APR.Severity.of.Illness.Description, levels = c('Extreme','Major','Moderate','Minor'))
+
+ggplot(droplevels.data.frame(hosp_clean[which(!is.na(hosp_clean$APR.Severity.of.Illness.Description)),]), aes(APR.Risk.of.Mortality)) + geom_bar(stat="count", aes(fill=APR.Risk.of.Mortality)) + facet_wrap(~APR.Severity.of.Illness.Description, scales="free") + scale_y_continuous(labels=function(x)x/1000) + xlab("Risk of Mortality") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Count of Admissions by Risk of Mortality and Severity of Illness") + theme(axis.text = element_text(size=10))
+```
+While admissions were likely to share the same risk of mortality and severity of illness, there was a significant amount of admissions that did not follow this pattern. Minor illnesses were almost entirely associated with a minor risk of mortality, while major illness showed the most variation between major and moderate risks of mortality. It is unclear why the distributions of the length of stay for each risk of mortality and severity of illness are so similar, given that the groups do not line up exactly.     
+I also attempted to examine length of stay density plots by medical/surgical description, but found that there was very little difference between the categories. 
+
+###Length of Stay and Admission/Discharge Day
+
+```{r}
+inlier_los$Admit.Day.of.Week <- factor(inlier_los$Admit.Day.of.Week,levels = c('SUN','SAT','FRI','THU','WED','TUE','MON'))
+ggplot(inlier_los, aes(x=Admit.Day.of.Week, y=Length.of.Stay)) + geom_boxplot(outlier.alpha=0.5, color="tomato4") + coord_flip() + theme_bw() + theme(axis.text = element_text(size=10)) + xlab("Admission Day of Week") + ylab("Length of Stay (Days)") + ggtitle("Length of Stay by Admission Day of Week")
+```
+I first attempted to look at length of stay by day of admission for the entire dataset, but found that the outliers at the extreme end of the dataset made each day look more or less exactly the same. Instead, I went back to the inliers subset I had created for the diagnostic length of stay analysis earlier. While the median length of stay is the same for admissions and any day of the week, admissions beginning on Tuesday, Wednesday, Thursday, or Friday appear more likely to have longer lengths of stay. To investigate this, I checked whether more medical or surgical admissions were occurring each day of the week.
+```{r}
+hosp_clean$Admit.Day.of.Week <- factor(hosp_clean$Admit.Day.of.Week,levels = c('SUN','SAT','FRI','THU','WED','TUE','MON'))
+ggplot(hosp_clean[which(!is.na(hosp_clean$APR.Medical.Surgical.Description)),], aes(Admit.Day.of.Week, fill=APR.Medical.Surgical.Description)) + geom_bar(stat="count", position=position_dodge()) + coord_flip() + scale_fill_manual(values=c('royalblue3','violetred2'), name="Medical/Surgical") + xlab("Admission Day of Week") + ylab("Count of Admissions (in Thousands)") + ggtitle("Admissions by Day of Week and Medical/Surgical Status") + theme(axis.text = element_text(size=10), legend.position = "bottom") + scale_y_continuous(labels=function(x)x/1000)
+```
+While the majority of admissions on any day of the week were for medical procedures, there were significantly more surgical admissions on Mondays and Tuesdays. Many surgeries are often scheduled for Mondays based on my limited knowledge of hospital scheduling, so I expected to see a larger proportion of surgical admissions on Mondays, leading to the shorter average length of stay for admissions beginning that day. This does not appear to entirely be the case, though it could be a contributing factor. I also checked whether discharge day of week showed correlation with length of stay.
+
+```{r}
+inlier_los$Discharge.Day.of.Week <- factor(inlier_los$Discharge.Day.of.Week,levels = c('SUN','SAT','FRI','THU','WED','TUE','MON'))
+ggplot(inlier_los, aes(x=Discharge.Day.of.Week, y=Length.of.Stay)) + geom_boxplot(outlier.alpha=0.5, color="skyblue4") + coord_flip() + theme_bw() + theme(axis.text = element_text(size=10)) + xlab("Discharge Day of Week") + ylab("Length of Stay (Days)") + ggtitle("Length of Stay by Discharge Day of Week")
+```
+I assumed that admissions of a greater length would be more likely to be discharged on a weekday than over the weekend, which does appear to be the case. Interestingly, the largest interquartile range is for inpatient admissions ending on Tuesdays. It is unclear from this analysis why this might be. Discharges on Mondays had the same median length of stay as those on Tuesdays, though with a lower IQR. The relatively small number of discharges over the weekend could be contributing to this longer length of stay on Mondays and Tuesdays - perhaps patients admitted on Thursday or Friday are likely to stay until after the weekend and have a greater length of stay by two to three days.
+
+```{r}
+hosp_clean$Discharge.Day.of.Week <- factor(hosp_clean$Discharge.Day.of.Week,levels = c('SUN','SAT','FRI','THU','WED','TUE','MON'))
+ggplot(hosp_clean[which(!is.na(hosp_clean$APR.Medical.Surgical.Description)),], aes(Discharge.Day.of.Week, fill=APR.Medical.Surgical.Description)) + geom_bar(stat="count", position=position_dodge()) + coord_flip() + scale_fill_manual(values=c('royalblue3','violetred2'), name="Medical/Surgical") + xlab("Discharge Day of Week") + ylab("Count of Admissions (in Thousands)") + ggtitle("Discharges by Day of Week and Medical/Surgical Status") + theme(axis.text = element_text(size=10), legend.position = "bottom") + scale_y_continuous(labels=function(x)x/1000)
+```
+I created the same medical/surgical admissions chart for discharge day of week as I did for admission day of week. For surgical admissions, the likelihood of being discharged increases with each weekday, with the most patients discharged on Fridays. The most medical admissions are also discharged on Fridays, though the relationship between weekdays and number of discharges is not as linear for these admissions. 
+
+```{r, fig.height=10, fig.width=7}
+week_admits <- hosp_clean[which(hosp_clean$Length.of.Stay <= 7),]
+week_admits$Discharge.Day.of.Week <- factor(week_admits$Discharge.Day.of.Week,levels = c('MON','TUE','WED','THU','FRI','SAT','SUN'))
+week_admits$Admit.Day.of.Week <- factor(week_admits$Admit.Day.of.Week,levels = c('MON','TUE','WED','THU','FRI','SAT','SUN'))
+
+ggplot(week_admits, aes(Discharge.Day.of.Week)) + geom_bar(stat="count", aes(fill=Discharge.Day.of.Week)) + facet_wrap(~Admit.Day.of.Week,ncol=2,nrow=4,scales="free_x") + scale_y_continuous(labels=function(x)x/1000) + xlab("Discharge Day of Week") + ylab("Count of Admissions (in Thousands)") + guides(fill=FALSE) + ggtitle("Count of <=7 Day Admissions by Admission and Discharge Day") + theme(axis.text = element_text(size=10))
+```
+To investigate the impact of the day of week on admissions and discharges, I subsetted the dataset to include only admissions lasting 7 days or less. This included 1,937,436 admissions, about 82% of the full dataset. I created a facet wrap plot for each admission day of week showing the discharge day of week for those admissions to further investigate the theory that patients admitted over the weekend were more likely to stay for more days and be discharged during the workweek. It appears that this is, for the most part, true. With the exception of patients admitted on Fridays, where patients were equally likely to be discharged two and three days following admission, patients staying a week or less are most likely to be discharged two days after their admission.  
+Patients admitted on Mondays were most often discharged on Wednesdays, then on Thursdays, and were unlikely to be discharged over the weekend. Those admitted on Tuesdays were most likely to be discharged on Thursdays, then Fridays. Admissions on Wednesdays were very likely to end on Fridays, more so than the admissions on other days of the week ending two days later. Patients admitted on Thursdays were most likely to be discharged on a Saturday, perhaps indicating that the tendency to discharge on a business day is outweighed by the tendency to discharge two days after admission. However, admissions beginning on Fridays were about equally likely to end on Sundays or Mondays. Saturday admissions were most often discharged on Monday, followed by Tuesday. Finally, Sunday admissions most frequently ended on Tuesdays, then on Wednesdays, and were the least likely of all admissions to end on a weekend.
+
+##Charges and Costs
+Finally, I briefly investigated the data on admission charges and costs available in the dataset. Due to the size of the dataset, this was the most difficult to visualize and interpret of the analysis I performed. I attempted to create a scatterplot of charges vs cost, but the sheer volume of data made this impossible to visualize clearly. I also tried to create a slope graph, using a parallel coordinate plot framework to look at the relationship between charges and costs, but found that the volume of data again made this impossible. 
+
+```{r}
+ggplot(hosp_clean, aes(y=Total.Charges, x="")) + geom_boxplot() + coord_flip() + scale_y_continuous(labels= dollar) + xlab("") + ylab("Total Charges") + ggtitle("Total Charges for Admissions")
+```
+```{r}
+summary(hosp_clean$Total.Charges)
+```
+
+I attempted to use violin plots, density estimates, and histograms, but found that the data was impossible to plot in this way due to the lack of concentraction around any particular point, as well as the very high outliers above $5,000,000. A boxplot was the best option, though this was still more or less impossible to read. The very high charges seemed astronomical, even given my knowledge of the very flawed health care system in the United States, so I investigated these further. 
+
+```{r}
+out_charge <- hosp_clean[which(hosp_clean$Total.Charges > as.numeric(5000000)),]
+out_charge_table <- data.frame(Facility.Name = out_charge$Facility.Name, Length.of.Stay = out_charge$Length.of.Stay, Patient.Disposition = out_charge$Patient.Disposition, CCS.Diagnosis.Description = out_charge$CCS.Diagnosis.Description, CCS.Procedure.Description = out_charge$CCS.Procedure.Description, Payment.Typology = out_charge$Payment.Typology.1, Total.Charges = out_charge$Total.Charges, Total.Costs = out_charge$Total.Costs)
+formattable(out_charge_table)
+```
+The five outliers over $5,000,000 had little in common on the surface, other than the fact that they all occurred at hospitals in the New York City health service area. However, upon closer investigation, they were all for serious conditions and procedures such as liver transplantation due to severe hepatitis C, bone marrow transplantation due to white blood cell disease, extensive internal injuries, heart dysrhythmia, and extensive hernia repair. Other than the internal injuries/crush admission, all lasted over 120 days. Despite the extensive procedures and long lengths of stay, this is still an absurd amount of money for any health care. The actual costs varied significantly, as the charges often do not reflect what is ultimately paid by the patient/insurance company, but are all still over a million dollars.
+
+```{r}
+in_charge <- hosp_clean[which(hosp_clean$Total.Charges < 43290),]
+ggplot(in_charge, aes(Total.Charges)) + geom_histogram(binwidth=2500, fill="thistle2") + scale_y_continuous(labels=function(x)x/1000) + scale_x_continuous(labels=dollar) + ylab("Count of Admissions (in Thousands)") + xlab("Total Charges") + ggtitle("Total Charges per Admission (Inliers)") + theme(axis.text = element_text(size=10))
+```
+I chose to consider the inliers for cost as those below the end of the IQR in the dataset, which was $43,294, and to create a histogram of these admissions with a binwidth of $2,500. These charges still formed a right-skewed distribution, but it was much more cohesive, with a single peak around $7,500. Given the widely varying nature of hospital admissions, it is expected that the charges would not form a normal distribution.  
+
+I expected that the total costs would form a similar distribution to the total charges in this subset, but with a lower peak as I believed that the costs were always less than or equal to the charges involved in an admission.
+
+```{r}
+ggplot(in_charge, aes(Total.Costs)) + geom_histogram(binwidth=2500, fill="turquoise") + scale_y_continuous(labels=function(x)x/1000) + ylab("Count of Admissions (in Thousands)") + xlab("Total Costs") + ggtitle("Total Costs per Admission (Charge Inliers)") + theme(axis.text = element_text(size=10)) + scale_x_continuous(labels=dollar)
+```
+The above histogram showed that my assumption was entirely incorrect - while nearly all of the costs fell below $50,000, there were some very high outliers over $400,000 even within this subset. As such, I created a variable for the ratio of charges to costs.
+```{r}
+hosp_clean$Charge.to.Cost <- hosp_clean$Total.Charges/hosp_clean$Total.Costs
+rat <- hosp_clean[which(hosp_clean$Charge.to.Cost < 1),]
+
+ggplot(hosp_clean, aes(y=Charge.to.Cost, x="")) + geom_violin(fill="seagreen", color="seagreen", bw=0.3) + coord_flip() + xlab("") + ylab("Charge to Cost Ratio") + ggtitle("Ratio of Charges to Costs for Admissions") + geom_hline(yintercept=1)
+```
+The vertical line in the figure above is at the 1.0 ratio mark, meaning that those admissions falling below it had higher costs than they did charges. This is a much more significant portion of the admissions than I expected, and a quick analysis revealed very little cohesive about these 46,322 admissions (2% of all admissions). However, the peak in the above ratio distribution appears to be around 2, meaning that the majority of admissions cost about half of what the original charges were. 
+
+##Charges and Costs per Day 
+Knowing that there is some cost per day inherent in every hospital admission regardless of the procedure or diagnosis, I created new variables for the costs and charges per day in the dataset. I did not find anything unique in the analysis of the charges per day variable, so I chose to focus on costs per day.
+
+```{r}
+hosp_clean$Cost.Per.Day <- hosp_clean$Total.Costs/hosp_clean$Length.of.Stay
+hosp_clean$Charges.Per.Day <- hosp_clean$Total.Charges/hosp_clean$Length.of.Stay
+
+ggplot(hosp_clean, aes(y=Cost.Per.Day, x="")) + geom_boxplot() + coord_flip() + ylab("Costs per Day") + xlab("") + theme(axis.text = element_text(size=10)) + ggtitle("Cost per Day for Hospital Admissions") + scale_y_continuous(labels=dollar)
+```
+```{r}
+summary(hosp_clean$Cost.Per.Day)
+```
+There appeared to be some very high outliers throwing off the dataset, as the maximum costs per day was over $1,000,000, and the data was clearly right skewed both from the boxplot and from the summary as the mean was higher than the median. As such, I again removed the five outliers over $500,000 to investigate them. 
+
+```{r}
+out_day_cost <- hosp_clean[which(hosp_clean$Cost.Per.Day > as.numeric(500000)),]
+out_day_cost_table <- data.frame(Facility.Name = out_day_cost$Facility.Name, Length.of.Stay = out_day_cost$Length.of.Stay, Patient.Disposition = out_day_cost$Patient.Disposition, CCS.Diagnosis.Description = out_day_cost$CCS.Diagnosis.Description, CCS.Procedure.Description = out_day_cost$CCS.Procedure.Description, Payment.Typology = out_day_cost$Payment.Typology.1, Total.Charges = out_day_cost$Total.Charges, Total.Costs = out_day_cost$Total.Costs)
+formattable(out_day_cost_table)
+```
+All seven of these admissions with high costs per day had lengths of stay of four days or less, and none were same as the high outliers in the total charges subset. They also all occurred at university hospitals, though there were many other hospitals associated with universities in the dataset. Four were kidney transplants at University Hospital, and one other was also a urinary procedure at the same hospital. The other two were at Nassau University Medical Center and were a mastectomy and a pacemaker insertion, respectively. It is difficult to tell from the data available why these seven admissions in particular had such high costs per day.  
+Overall, I was surprised by how difficult it was to investigate the charge and cost data available for these 2014 admissions. There was a great deal of variation, even within admissions that appeared very similar, and I could not even begin to look at the charge/cost ratio by payment typology.
+
+#Conclusion
+Even after devoting a great deal of time and effort to exploring this dataset, there are still many questions I have not even touched. There are still a number of variables that could be explored, including type of admission, patient disposition, emergency department status, and payment typology. Future questions could include how the charge to cost ratio differs between payment typology, whether the type of an admission has any bearing on length of stay, diagnosis, and other factors, and the relationship of patient disposition to location, condition, demographics, and procedure. While the size of this dataset allowed me to ask any number of questions, the scale of the data was also a limitation in that many types of visualization were simply not possible/readable with over two million distinct observations. Other limitations included the vague demographic data and the coding of long lengths of stay as simple 120+ days. Many subsets of this data, such as the hospitals or diagnoses, could be analyzed extensively to try to uncover more cohesive patterns. From this analysis, it seems that it is difficult to analyze such large sets of inpatient admission data due to the wide variation in the types of admissions.
